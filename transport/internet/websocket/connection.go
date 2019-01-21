@@ -5,11 +5,10 @@ import (
 	"net"
 	"time"
 
-	"websocket"
-
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/serial"
+	"v2ray.com/core/external/github.com/gorilla/websocket"
 )
 
 var (
@@ -18,10 +17,9 @@ var (
 
 // connection is a wrapper for net.Conn over WebSocket connection.
 type connection struct {
-	conn          *websocket.Conn
-	reader        io.Reader
-	mergingWriter *buf.BufferedWriter
-	remoteAddr    net.Addr
+	conn       *websocket.Conn
+	reader     io.Reader
+	remoteAddr net.Addr
 }
 
 func newConnection(conn *websocket.Conn, remoteAddr net.Addr) *connection {
@@ -70,13 +68,10 @@ func (c *connection) Write(b []byte) (int, error) {
 }
 
 func (c *connection) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	if c.mergingWriter == nil {
-		c.mergingWriter = buf.NewBufferedWriter(&buf.BufferToBytesWriter{Writer: c})
-	}
-	if err := c.mergingWriter.WriteMultiBuffer(mb); err != nil {
-		return err
-	}
-	return c.mergingWriter.Flush()
+	mb = buf.Compact(mb)
+	mb, err := buf.WriteMultiBuffer(c, mb)
+	buf.ReleaseMulti(mb)
+	return err
 }
 
 func (c *connection) Close() error {

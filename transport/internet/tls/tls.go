@@ -2,31 +2,37 @@ package tls
 
 import (
 	"crypto/tls"
-	"net"
 
 	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/net"
 )
 
-//go:generate go run $GOPATH/src/v2ray.com/core/common/errors/errorgen/main.go -pkg tls -path Transport,Internet,TLS
+//go:generate errorgen
 
 var (
 	_ buf.Writer = (*conn)(nil)
 )
 
 type conn struct {
-	net.Conn
-
-	mergingWriter *buf.BufferedWriter
+	*tls.Conn
 }
 
 func (c *conn) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	if c.mergingWriter == nil {
-		c.mergingWriter = buf.NewBufferedWriter(buf.NewWriter(c.Conn))
+	mb = buf.Compact(mb)
+	mb, err := buf.WriteMultiBuffer(c, mb)
+	buf.ReleaseMulti(mb)
+	return err
+}
+
+func (c *conn) HandshakeAddress() net.Address {
+	if err := c.Handshake(); err != nil {
+		return nil
 	}
-	if err := c.mergingWriter.WriteMultiBuffer(mb); err != nil {
-		return err
+	state := c.Conn.ConnectionState()
+	if len(state.ServerName) == 0 {
+		return nil
 	}
-	return c.mergingWriter.Flush()
+	return net.ParseAddress(state.ServerName)
 }
 
 // Client initiates a TLS client handshake on the given connection.

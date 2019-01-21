@@ -2,14 +2,19 @@ package scenarios
 
 import (
 	"testing"
+	"time"
 
 	xproxy "golang.org/x/net/proxy"
-	socks4 "h12.me/socks"
+	socks4 "h12.io/socks"
+
 	"v2ray.com/core"
 	"v2ray.com/core/app/proxyman"
+	"v2ray.com/core/app/router"
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/serial"
+	"v2ray.com/core/proxy/blackhole"
 	"v2ray.com/core/proxy/dokodemo"
 	"v2ray.com/core/proxy/freedom"
 	"v2ray.com/core/proxy/socks"
@@ -19,13 +24,11 @@ import (
 )
 
 func TestSocksBridgeTCP(t *testing.T) {
-	assert := With(t)
-
 	tcpServer := tcp.Server{
 		MsgProcessor: xor,
 	}
 	dest, err := tcpServer.Start()
-	assert(err, IsNil)
+	common.Must(err)
 	defer tcpServer.Close()
 
 	serverPort := tcp.PickPort()
@@ -93,26 +96,12 @@ func TestSocksBridgeTCP(t *testing.T) {
 	}
 
 	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	assert(err, IsNil)
+	common.Must(err)
+	defer CloseAllServers(servers)
 
-	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
-		IP:   []byte{127, 0, 0, 1},
-		Port: int(clientPort),
-	})
-	assert(err, IsNil)
-
-	payload := "test payload"
-	nBytes, err := conn.Write([]byte(payload))
-	assert(err, IsNil)
-	assert(nBytes, Equals, len(payload))
-
-	response := make([]byte, 1024)
-	nBytes, err = conn.Read(response)
-	assert(err, IsNil)
-	assert(response[:nBytes], Equals, xor([]byte(payload)))
-	assert(conn.Close(), IsNil)
-
-	CloseAllServers(servers)
+	if err := testTCPConn(clientPort, 1024, time.Second*2)(); err != nil {
+		t.Error(err)
+	}
 }
 
 func TestSocksBridageUDP(t *testing.T) {
@@ -182,6 +171,109 @@ func TestSocksBridageUDP(t *testing.T) {
 									}),
 								},
 							},
+						},
+					},
+				}),
+			},
+		},
+	}
+
+	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
+	assert(err, IsNil)
+
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
+		IP:   []byte{127, 0, 0, 1},
+		Port: int(clientPort),
+	})
+	assert(err, IsNil)
+
+	payload := "dokodemo request."
+	nBytes, err := conn.Write([]byte(payload))
+	assert(err, IsNil)
+	assert(nBytes, Equals, len(payload))
+
+	response := make([]byte, 1024)
+	nBytes, err = conn.Read(response)
+	assert(err, IsNil)
+	assert(response[:nBytes], Equals, xor([]byte(payload)))
+	assert(conn.Close(), IsNil)
+
+	CloseAllServers(servers)
+}
+
+func TestSocksBridageUDPWithRouting(t *testing.T) {
+	assert := With(t)
+
+	udpServer := udp.Server{
+		MsgProcessor: xor,
+	}
+	dest, err := udpServer.Start()
+	assert(err, IsNil)
+	defer udpServer.Close()
+
+	serverPort := tcp.PickPort()
+	serverConfig := &core.Config{
+		App: []*serial.TypedMessage{
+			serial.ToTypedMessage(&router.Config{
+				Rule: []*router.RoutingRule{
+					{
+						TargetTag: &router.RoutingRule_Tag{
+							Tag: "out",
+						},
+						InboundTag: []string{"socks"},
+					},
+				},
+			}),
+		},
+		Inbound: []*core.InboundHandlerConfig{
+			{
+				Tag: "socks",
+				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+					PortRange: net.SinglePortRange(serverPort),
+					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+				}),
+				ProxySettings: serial.ToTypedMessage(&socks.ServerConfig{
+					AuthType:   socks.AuthType_NO_AUTH,
+					Address:    net.NewIPOrDomain(net.LocalHostIP),
+					UdpEnabled: true,
+				}),
+			},
+		},
+		Outbound: []*core.OutboundHandlerConfig{
+			{
+				ProxySettings: serial.ToTypedMessage(&blackhole.Config{}),
+			},
+			{
+				Tag:           "out",
+				ProxySettings: serial.ToTypedMessage(&freedom.Config{}),
+			},
+		},
+	}
+
+	clientPort := tcp.PickPort()
+	clientConfig := &core.Config{
+		Inbound: []*core.InboundHandlerConfig{
+			{
+				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+					PortRange: net.SinglePortRange(clientPort),
+					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+				}),
+				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+					Address: net.NewIPOrDomain(dest.Address),
+					Port:    uint32(dest.Port),
+					NetworkList: &net.NetworkList{
+						Network: []net.Network{net.Network_TCP, net.Network_UDP},
+					},
+				}),
+			},
+		},
+		Outbound: []*core.OutboundHandlerConfig{
+			{
+				ProxySettings: serial.ToTypedMessage(&socks.ClientConfig{
+					Server: []*protocol.ServerEndpoint{
+						{
+							Address: net.NewIPOrDomain(net.LocalHostIP),
+							Port:    uint32(serverPort),
 						},
 					},
 				}),

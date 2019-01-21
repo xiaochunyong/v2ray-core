@@ -1,21 +1,24 @@
 package scenarios
 
 import (
+	"crypto/rand"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/google/go-cmp/cmp"
 	"v2ray.com/core"
 	"v2ray.com/core/app/dispatcher"
 	"v2ray.com/core/app/proxyman"
 	"v2ray.com/core/common"
+	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/log"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/retry"
@@ -39,6 +42,17 @@ func readFrom(conn net.Conn, timeout time.Duration, length int) []byte {
 		fmt.Println("Unexpected error from readFrom:", err)
 	}
 	return b[:n]
+}
+
+func readFrom2(conn net.Conn, timeout time.Duration, length int) ([]byte, error) {
+	b := make([]byte, length)
+	deadline := time.Now().Add(timeout)
+	conn.SetReadDeadline(deadline)
+	n, err := io.ReadFull(conn, b[:length])
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
 }
 
 func InitializeServerConfigs(configs ...*core.Config) ([]*exec.Cmd, error) {
@@ -113,7 +127,11 @@ func CloseAllServers(servers []*exec.Cmd) {
 		Content:  "Closing all servers.",
 	})
 	for _, server := range servers {
-		server.Process.Signal(os.Interrupt)
+		if runtime.GOOS == "windows" {
+			server.Process.Kill()
+		} else {
+			server.Process.Signal(syscall.SIGTERM)
+		}
 	}
 	for _, server := range servers {
 		server.Process.Wait()
@@ -129,4 +147,37 @@ func withDefaultApps(config *core.Config) *core.Config {
 	config.App = append(config.App, serial.ToTypedMessage(&proxyman.InboundConfig{}))
 	config.App = append(config.App, serial.ToTypedMessage(&proxyman.OutboundConfig{}))
 	return config
+}
+
+func testTCPConn(port net.Port, payloadSize int, timeout time.Duration) func() error {
+	return func() error {
+		conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
+			IP:   []byte{127, 0, 0, 1},
+			Port: int(port),
+		})
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		payload := make([]byte, payloadSize)
+		common.Must2(rand.Read(payload))
+
+		nBytes, err := conn.Write(payload)
+		if err != nil {
+			return err
+		}
+		if nBytes != len(payload) {
+			return errors.New("expect ", len(payload), " written, but actually ", nBytes)
+		}
+
+		response, err := readFrom2(conn, timeout, payloadSize)
+		if err != nil {
+			return err
+		}
+		if r := cmp.Diff(response, xor(payload)); r != "" {
+			return errors.New(r)
+		}
+		return nil
+	}
 }

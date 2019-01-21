@@ -2,12 +2,12 @@ package scenarios
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"io"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 
 	"v2ray.com/core"
@@ -55,7 +55,9 @@ func TestCommanderRemoveHandler(t *testing.T) {
 				Rule: []*router.RoutingRule{
 					{
 						InboundTag: []string{"api"},
-						Tag:        "api",
+						TargetTag: &router.RoutingRule_Tag{
+							Tag: "api",
+						},
 					},
 				},
 			}),
@@ -68,11 +70,9 @@ func TestCommanderRemoveHandler(t *testing.T) {
 					Listen:    net.NewIPOrDomain(net.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address: net.NewIPOrDomain(dest.Address),
-					Port:    uint32(dest.Port),
-					NetworkList: &net.NetworkList{
-						Network: []net.Network{net.Network_TCP},
-					},
+					Address:  net.NewIPOrDomain(dest.Address),
+					Port:     uint32(dest.Port),
+					Networks: []net.Network{net.Network_TCP},
 				}),
 			},
 			{
@@ -82,11 +82,9 @@ func TestCommanderRemoveHandler(t *testing.T) {
 					Listen:    net.NewIPOrDomain(net.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address: net.NewIPOrDomain(dest.Address),
-					Port:    uint32(dest.Port),
-					NetworkList: &net.NetworkList{
-						Network: []net.Network{net.Network_TCP},
-					},
+					Address:  net.NewIPOrDomain(dest.Address),
+					Port:     uint32(dest.Port),
+					Networks: []net.Network{net.Network_TCP},
 				}),
 			},
 		},
@@ -101,12 +99,17 @@ func TestCommanderRemoveHandler(t *testing.T) {
 	servers, err := InitializeServerConfigs(clientConfig)
 	assert(err, IsNil)
 
+	defer CloseAllServers(servers)
+
 	{
 		conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
 			IP:   []byte{127, 0, 0, 1},
 			Port: int(clientPort),
 		})
-		assert(err, IsNil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close() // nolint: errcheck
 
 		payload := "commander request."
 		nBytes, err := conn.Write([]byte(payload))
@@ -116,12 +119,14 @@ func TestCommanderRemoveHandler(t *testing.T) {
 		response := make([]byte, 1024)
 		nBytes, err = conn.Read(response)
 		assert(err, IsNil)
-		assert(response[:nBytes], Equals, xor([]byte(payload)))
-		assert(conn.Close(), IsNil)
+		if r := cmp.Diff(response[:nBytes], xor([]byte(payload))); r != "" {
+			t.Fatal(r)
+		}
 	}
 
 	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithInsecure(), grpc.WithBlock())
 	assert(err, IsNil)
+	defer cmdConn.Close()
 
 	hsClient := command.NewHandlerServiceClient(cmdConn)
 	resp, err := hsClient.RemoveInbound(context.Background(), &command.RemoveInboundRequest{
@@ -137,8 +142,6 @@ func TestCommanderRemoveHandler(t *testing.T) {
 		})
 		assert(err, IsNotNil)
 	}
-
-	CloseAllServers(servers)
 }
 
 func TestCommanderAddRemoveUser(t *testing.T) {
@@ -168,7 +171,9 @@ func TestCommanderAddRemoveUser(t *testing.T) {
 				Rule: []*router.RoutingRule{
 					{
 						InboundTag: []string{"api"},
-						Tag:        "api",
+						TargetTag: &router.RoutingRule_Tag{
+							Tag: "api",
+						},
 					},
 				},
 			}),
@@ -208,11 +213,9 @@ func TestCommanderAddRemoveUser(t *testing.T) {
 					Listen:    net.NewIPOrDomain(net.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address: net.NewIPOrDomain(dest.Address),
-					Port:    uint32(dest.Port),
-					NetworkList: &net.NetworkList{
-						Network: []net.Network{net.Network_TCP},
-					},
+					Address:  net.NewIPOrDomain(dest.Address),
+					Port:     uint32(dest.Port),
+					Networks: []net.Network{net.Network_TCP},
 				}),
 			},
 		},
@@ -302,6 +305,7 @@ func TestCommanderAddRemoveUser(t *testing.T) {
 
 	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithInsecure(), grpc.WithBlock())
 	assert(err, IsNil)
+	defer cmdConn.Close()
 
 	hsClient := command.NewHandlerServiceClient(cmdConn)
 	resp, err := hsClient.AlterInbound(context.Background(), &command.AlterInboundRequest{
@@ -376,7 +380,9 @@ func TestCommanderStats(t *testing.T) {
 				Rule: []*router.RoutingRule{
 					{
 						InboundTag: []string{"api"},
-						Tag:        "api",
+						TargetTag: &router.RoutingRule_Tag{
+							Tag: "api",
+						},
 					},
 				},
 			}),
@@ -487,27 +493,18 @@ func TestCommanderStats(t *testing.T) {
 	}
 
 	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	assert(err, IsNil)
+	if err != nil {
+		t.Fatal("Failed to create all servers", err)
+	}
+	defer CloseAllServers(servers)
 
-	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
-		IP:   []byte{127, 0, 0, 1},
-		Port: int(clientPort),
-	})
-	assert(err, IsNil)
-
-	payload := make([]byte, 10240*1024)
-	rand.Read(payload)
-
-	nBytes, err := conn.Write([]byte(payload))
-	assert(err, IsNil)
-	assert(nBytes, Equals, len(payload))
-
-	response := readFrom(conn, time.Second*20, 10240*1024)
-	assert(response, Equals, xor([]byte(payload)))
-	assert(conn.Close(), IsNil)
+	if err := testTCPConn(clientPort, 10240*1024, time.Second*20)(); err != nil {
+		t.Fatal(err)
+	}
 
 	cmdConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", cmdPort), grpc.WithInsecure(), grpc.WithBlock())
 	assert(err, IsNil)
+	defer cmdConn.Close()
 
 	const name = "user>>>test>>>traffic>>>uplink"
 	sClient := statscmd.NewStatsServiceClient(cmdConn)
@@ -533,6 +530,4 @@ func TestCommanderStats(t *testing.T) {
 	})
 	assert(err, IsNil)
 	assert(sresp.Stat.Value, GreaterThan, int64(10240*1024))
-
-	CloseAllServers(servers)
 }
